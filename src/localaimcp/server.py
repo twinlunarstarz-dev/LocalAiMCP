@@ -117,7 +117,7 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
         params.append(
             inspect.Parameter(
                 name,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 default=default,
                 annotation=_annotated(annotation, description),
             )
@@ -135,7 +135,7 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
         params.append(
             inspect.Parameter(
                 "body",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 default=None,
                 annotation=_annotated(Optional[dict[str, Any]], "Optional JSON body for undocumented or extension fields."),
             )
@@ -146,7 +146,7 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
         params.append(
             inspect.Parameter(
                 "extra_form",
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
                 default=None,
                 annotation=_annotated(Optional[dict[str, Any]], "Additional multipart form fields, including backend-specific params."),
             )
@@ -155,7 +155,7 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
     params.append(
         inspect.Parameter(
             "extra_headers",
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
             default=None,
             annotation=_annotated(Optional[dict[str, str]], "Optional headers merged into this LocalAI request."),
         )
@@ -164,7 +164,7 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
     params.append(
         inspect.Parameter(
             "timeout_seconds",
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
             default=None,
             annotation=_annotated(Optional[float], "Override the LocalAI request timeout for this call."),
         )
