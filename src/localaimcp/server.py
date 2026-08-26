@@ -122,7 +122,12 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
                 annotation=_annotated(annotation, description),
             )
         )
-        meta[name] = {"raw_name": raw_name, "in": location, "file": p.get("type") == "file"}
+        meta[name] = {
+            "raw_name": raw_name,
+            "in": location,
+            "file": p.get("type") == "file",
+            "collection_format": p.get("collectionFormat"),
+        }
 
     # Preserve functionality when the generated Swagger omits a JSON body (notably
     # PATCH /api/models/config-json/{name}) and for LocalAI extension fields.
@@ -193,6 +198,8 @@ def _make_http_callable(op: Operation):
             elif where == "formData":
                 if item["file"]:
                     files[raw] = value
+                elif item.get("collection_format") == "csv" and isinstance(value, (list, tuple)):
+                    form[raw] = ",".join(str(v) for v in value)
                 else:
                     form[raw] = value
             elif where == "body":
