@@ -221,6 +221,8 @@ def _make_http_callable(op: Operation):
     invoke.__qualname__ = op.tool_name
     invoke.__doc__ = f"{op.summary} LocalAI {op.method} {op.path}."
     invoke.__signature__ = inspect.Signature(params, return_annotation=dict[str, Any])
+    invoke.__annotations__ = {p.name: p.annotation for p in params}
+    invoke.__annotations__["return"] = dict[str, Any]
     return invoke
 
 
