@@ -1,0 +1,24 @@
+services:
+  localaimcp:
+    build: .
+    container_name: localaimcp
+    restart: unless-stopped
+    environment:
+      LOCALAI_BASE_URL: ${LOCALAI_BASE_URL:-http://host.docker.internal:8080}
+      LOCALAI_API_KEY: ${LOCALAI_API_KEY:-}
+      LOCALAI_REQUEST_TIMEOUT: ${LOCALAI_REQUEST_TIMEOUT:-300}
+      LOCALAI_CONNECT_TIMEOUT: ${LOCALAI_CONNECT_TIMEOUT:-10}
+      LOCALAI_MCP_FILE_ROOT: /data
+      LOCALAI_MCP_OUTPUT_DIR: /data/output
+      LOCALAI_MCP_SAVE_BINARY: ${LOCALAI_MCP_SAVE_BINARY:-true}
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8000
+      MCP_PATH: /mcp
+      MCP_STATELESS_HTTP: "true"
+      MCP_WORKERS: ${MCP_WORKERS:-2}
+    ports:
+      - "${MCP_PORT:-8000}:8000"
+    volumes:
+      - ./data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
