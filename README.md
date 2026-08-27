@@ -48,7 +48,6 @@ text_to_speech
 text_to_speech_with_voice
 
 # Voice
-a list below without this label typo would be confusing, so the actual names are:
 list_voice_profiles
 create_voice_profile
 analyze_voice
@@ -221,6 +220,7 @@ Repository tests verify:
 - referenced request/response schemas surfacing real fields
 - `detokenize` exposing useful token/model/content guidance on demand
 - WebSocket detection, response wrapping, and binary handling
+- built wheels containing all four bundled Swagger payload parts
 
 Run locally with dependencies installed:
 
