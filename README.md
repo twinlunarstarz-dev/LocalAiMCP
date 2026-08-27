@@ -1,8 +1,8 @@
 # LocalAiMCP
 
-A stateless, asynchronous FastMCP control plane for LocalAI. The server exposes every operation in the bundled LocalAI Swagger as an MCP tool, including inference, model/backend management, monitoring, agent jobs, config, routing/PII, media, voice/face, node/P2P, and WebSocket operations.
+A stateless, asynchronous FastMCP control plane for LocalAI. The bundled LocalAI Swagger contains **114 paths / 123 operations**, and all 123 remain usable through typed, validated callables. To avoid sending roughly 123 operation schemas to the model on every MCP request, only a curated set is advertised directly; everything else is discoverable and executable on demand.
 
-The bundled Swagger currently contains **114 paths / 123 operations**. Two WebSocket operations are implemented as bounded one-call exchanges, 10 multipart routes support file uploads, and binary responses can be saved under `./data/output` and returned inline as base64 when small enough.
+Two Swagger WebSocket operations are implemented as bounded one-call exchanges, multipart routes support file uploads, and binary responses can be saved under `./data/output` and returned inline as base64 when small enough.
 
 ## Run
 
@@ -20,78 +20,160 @@ The MCP endpoint is:
 http://localhost:8000/mcp
 ```
 
-For VS Code/Zoo Code or another Streamable HTTP MCP client, use that URL as the remote MCP server endpoint. The container defaults to `host.docker.internal:8080` for LocalAI and includes the Linux `host-gateway` mapping. If LocalAI runs elsewhere, set `LOCALAI_BASE_URL` to a URL reachable **from the container**.
+For VS Code/Zoo Code or another Streamable HTTP MCP client, use that URL as the remote MCP server endpoint. The container defaults to `host.docker.internal:8080` for LocalAI and includes the Linux `host-gateway` mapping.
 
-## LLM-oriented tool design
+## Curated tool surface
 
-The tool surface is intentionally designed so a model does not need prior LocalAI API knowledge:
+The server does **not** advertise all 123 LocalAI operations by default. The default preset advertises 20 commonly useful operation tools plus five fixed discovery/system helpers.
 
-- Tool names describe the action rather than mirroring HTTP routes or methods.
-- Every typed HTTP tool description states its purpose, expected inputs, and success output.
-- JSON request schemas carry field-level descriptions, including fallback descriptions when Swagger only says things like `Request` or `query params`.
-- Referenced request objects surface their useful top-level fields directly in the tool description.
-- Response descriptions explain whether data appears under `data`, `text`, `events`, `base64`, or `saved_path` in the MCP response wrapper.
-- `find_tools` accepts a plain-language goal and returns the most relevant LocalAI tools and their full usage descriptions.
-- Wrapper plumbing such as custom headers and per-call timeouts is kept off normal typed tools; use `raw_request` only for advanced/undocumented routes.
-
-Examples of simplified names:
+Default directly exposed operation tools:
 
 ```text
+# System/model information
+get_system_info
+get_metrics
+get_token_metrics
+list_models
+list_model_capabilities
+get_backend_monitor
+
+# Generation/media
 chat
 complete_text
-embed
 generate_image
-transcribe_audio
+inpaint_image
+generate_sound
+generate_video
 text_to_speech
-tokenize
-detokenize
-list_models
-stream_backend_logs
+text_to_speech_with_voice
+
+# Voice
+a list below without this label typo would be confusing, so the actual names are:
+list_voice_profiles
+create_voice_profile
+analyze_voice
+verify_speakers
+
+# 3D
+generate_3d_asset
+remesh_3d_asset
 ```
 
-For example, `detokenize` explains that its `request` object contains:
+The five fixed MCP helpers are:
+
+```text
+list_additional_tools
+search_additional_tools
+execute_additional_tool
+server_health
+schema_audit
+```
+
+Thus the default `tools/list` surface is **25 tools**, rather than about 128. The exact number is configurable.
+
+### Configure which LocalAI operations are directly visible
+
+Set `LOCALAI_MCP_EXPOSED_TOOLS` to a comma-separated list of semantic operation names:
+
+```env
+LOCALAI_MCP_EXPOSED_TOOLS=chat,list_models,generate_image,text_to_speech,generate_3d_asset
+```
+
+Special values:
+
+```text
+*       expose all 123 Swagger operations directly
+none    expose no Swagger operations directly; use only the gateway/system helpers
+gateway-only  same as none
+```
+
+An empty or unset value uses the built-in 20-operation preset. Invalid names fail startup instead of silently disappearing.
+
+Changing direct exposure affects only what MCP clients receive in `tools/list`; it does **not** remove the hidden operation from LocalAiMCP.
+
+## Additional-tool gateway
+
+Less common tools stay in an internal typed registry and are accessed through three small tools.
+
+### `list_additional_tools`
+
+Returns the complete sorted list of hidden tool names and nothing schema-heavy. It is intentionally compact so a model can inspect the whole hidden catalog on demand without permanently carrying those schemas in every request.
+
+### `search_additional_tools`
+
+Searches only hidden tools using a plain-language goal or an exact tool name. Each match returns:
+
+- semantic tool name
+- detailed purpose/input/output description
+- tags
+- complete input JSON schema
+
+Examples:
+
+```text
+search_additional_tools(query="detokenize token ids")
+search_additional_tools(query="transcribe audio")
+search_additional_tools(query="install a backend")
+search_additional_tools(query="inspect request traces")
+```
+
+### `execute_additional_tool`
+
+Executes a hidden capability by semantic name:
+
+```json
+{
+  "tool_name": "detokenize",
+  "arguments": {
+    "request": {
+      "model": "my-model",
+      "tokens": [1, 42, 9001]
+    }
+  }
+}
+```
+
+The `arguments` object is validated against the **same generated Pydantic schema** used by a directly exposed operation. Invalid or unknown fields return a validation error and the expected input schema before any LocalAI request is made. This is not a curl-style dispatcher: the model uses semantic tool names and typed arguments rather than HTTP methods/routes.
+
+Directly exposed operations are intentionally rejected by `execute_additional_tool`; the client should call their normal MCP tool directly.
+
+The previous advanced `raw_request` escape hatch and `probe_safe_endpoints` helper are retained as hidden additional tools, so reducing `tools/list` does not remove those capabilities.
+
+## LLM-oriented descriptions
+
+The registry is designed so a model does not need prior LocalAI API knowledge:
+
+- Tool names describe tasks rather than mirroring HTTP routes or methods.
+- Every typed HTTP operation states its purpose, expected inputs, and success output.
+- JSON request schemas carry field-level descriptions, including conservative fallback guidance when Swagger only says things like `Request` or leaves a field undocumented.
+- Referenced request objects surface useful top-level fields directly in descriptions.
+- Response descriptions explain whether data appears under `data`, `text`, `events`, `base64`, or `saved_path`.
+- Search returns the complete input schema only when the hidden tool is relevant.
+- Wrapper plumbing such as custom headers and per-call timeouts stays off normal typed operations.
+
+For example, hidden tool `detokenize` explains that its request contains:
 
 - `tokens`: integer token IDs to convert back to text
 - `model`: LocalAI model name or alias whose tokenizer should be used
 
-and that the JSON result contains `content`, the detokenized text.
-
-If a model knows the goal but not the tool name, it can call:
-
-```text
-find_tools(query="load a model")
-find_tools(query="transcribe audio")
-find_tools(query="inspect backend traces")
-```
+and that the JSON response contains `content`, the detokenized text.
 
 ## Design
 
-- **FastMCP 3.4.7**, pinned to the stable version used by this project.
-- **Streamable HTTP + stateless mode**. Docker uses multiple Uvicorn workers by default (`MCP_WORKERS=2`), safe because MCP session state is disabled.
+- **FastMCP 3.4.7**, pinned for reproducibility.
+- **Streamable HTTP + stateless mode**. Multiple Uvicorn workers are safe because discovery and execution use a process-local immutable registry rather than conversational/session state.
 - **Async LocalAI I/O** with `httpx`; independent calls can run concurrently.
-- **One typed MCP tool per Swagger operation** with semantic names, detailed descriptions, typed path/query/form parameters, nested request-body schemas, and LocalAI tags.
+- **123 typed Swagger operation callables** with semantic names and generated input validation; only the configured subset is registered directly with FastMCP.
+- **On-demand gateway** for hidden operations, preserving full LocalAI functionality without advertising every schema on every request.
 - **Multipart support** for audio, images, GLB files, branding assets, and voice profiles. File arguments accept `data:` URIs, `base64:<data>`, HTTP(S) URLs, or files under `/data`.
-- **Binary support** for audio/images/GLB responses. Small payloads are returned as base64; binary payloads are also saved to `/data/output` by default (host path `./data/output`).
+- **Binary support** for audio/images/GLB responses. Small payloads are returned as base64; binary payloads can also be saved to `/data/output`.
 - **SSE-aware response handling** aggregates LocalAI SSE events into a structured result.
-- **WebSocket support** for backend-log streaming and realtime audio transforms using bounded exchanges so the MCP server remains stateless.
+- **WebSocket support** for backend-log streaming and realtime audio transforms using bounded exchanges.
 - **Bearer auth** via `LOCALAI_API_KEY`; no token is stored in code or returned to MCP clients.
-- **Raw escape hatch** (`raw_request`) for LocalAI extensions or newly added routes not yet in the bundled Swagger.
-
-## Built-in management/discovery tools
-
-`find_tools` searches all typed LocalAI tools by a plain-language goal and returns matching names and complete descriptions. It does not contact or modify LocalAI.
-
-`server_health` concurrently checks `/system`, `/v1/models`, and `/backends`.
-
-`schema_audit` verifies that all bundled Swagger operations have unique MCP tool mappings and reports counts by tag, multipart type, and WebSocket type.
-
-`probe_safe_endpoints` concurrently probes only zero-argument GET endpoints. It avoids destructive/mutating calls and GET routes that require IDs or parameters.
-
-`raw_request` sends an arbitrary method/path/body/query request to the configured LocalAI base URL. It refuses full URLs for the request path, so calls remain scoped to the configured LocalAI server. Prefer a typed tool whenever one exists.
 
 ## Response wrapper
 
-Typed HTTP tools return a predictable wrapper:
+Typed HTTP operations return a predictable wrapper:
 
 - `ok`: whether LocalAI returned a successful HTTP status
 - `status_code`: LocalAI HTTP status
@@ -112,28 +194,33 @@ For multipart tools, a file argument can be any of:
 - an `http://` or `https://` URL that the MCP container can fetch
 - a local path under `LOCALAI_MCP_FILE_ROOT` (`/data` in Compose)
 
-The Compose file mounts `./data` to `/data`. Put host files there when path-based upload is easiest.
+The Compose file mounts `./data` to `/data`.
 
 ## LocalAI streaming behavior
 
-LocalAI request bodies that set `stream=true` are forwarded unchanged. If LocalAI answers with `text/event-stream`, the MCP tool collects the SSE `data:` events and returns them when the LocalAI stream ends. This keeps a tool call compatible with ordinary MCP clients while preserving streamed chunks in order.
+LocalAI request bodies that set `stream=true` are forwarded unchanged. If LocalAI answers with `text/event-stream`, the MCP call collects the SSE `data:` events and returns them when the LocalAI stream ends.
 
 The two Swagger WebSocket routes are mapped specially:
 
 - `stream_backend_logs`: collect backend log messages for a model up to `max_messages`, then close.
-- `stream_audio_transform`: send one session/config JSON object plus base64 PCM frames, collect transformed messages up to `max_messages`, then close.
+- `stream_audio_transform`: send one session/config object plus base64 PCM frames, collect transformed messages up to `max_messages`, then close.
+
+They may be direct or hidden depending on `LOCALAI_MCP_EXPOSED_TOOLS`; hidden WebSocket tools remain executable through `execute_additional_tool`.
 
 ## Verification
 
-The repository tests assert:
+Repository tests verify:
 
 - exact Swagger coverage: 114 paths / 123 operations
-- 123 unique semantic names, no route/method suffix naming
-- every non-WebSocket typed tool explains inputs and outputs
-- every referenced request body surfaces actual request fields in its tool description
-- the `detokenize` MCP schema exposes `tokens` and `model` with useful field descriptions
-- FastMCP can enumerate the complete tool surface in-memory
-- WebSocket detection, JSON response wrapping, and binary handling
+- 123 unique reviewed semantic names
+- the default curated exposure count and MCP `tools/list` count
+- the full hidden-name catalog
+- hidden search returning real descriptions and generated input schemas
+- hidden execution validating arguments before network access
+- every non-WebSocket operation description explaining inputs and outputs
+- referenced request/response schemas surfacing real fields
+- `detokenize` exposing useful token/model/content guidance on demand
+- WebSocket detection, response wrapping, and binary handling
 
 Run locally with dependencies installed:
 
@@ -149,7 +236,7 @@ docker compose config
 docker compose build
 ```
 
-An MCP client should perform the normal MCP `initialize` handshake against `http://localhost:8000/mcp`. Once connected, call `schema_audit`, then `server_health`, then `probe_safe_endpoints` for a non-destructive live check.
+An MCP client should perform the normal MCP `initialize` handshake against `http://localhost:8000/mcp`.
 
 ## Configuration
 
@@ -157,6 +244,7 @@ An MCP client should perform the normal MCP `initialize` handshake against `http
 |---|---|---|
 | `LOCALAI_BASE_URL` | `http://host.docker.internal:8080` | LocalAI base URL visible to the container |
 | `LOCALAI_API_KEY` | empty | Optional LocalAI bearer token |
+| `LOCALAI_MCP_EXPOSED_TOOLS` | built-in 20-tool preset | Comma-separated directly exposed Swagger operation names; `*` for all, `none` for none |
 | `LOCALAI_REQUEST_TIMEOUT` | `300` | Overall LocalAI request timeout seconds |
 | `LOCALAI_CONNECT_TIMEOUT` | `10` | Connection timeout seconds |
 | `LOCALAI_MCP_MAX_UPLOAD_BYTES` | `104857600` | Maximum fetched/uploaded file size |
@@ -168,4 +256,4 @@ An MCP client should perform the normal MCP `initialize` handshake against `http
 
 ## Security note
 
-This MCP exposes LocalAI administrative/destructive endpoints, including model/backend install/delete, task/job controls, trace/log clearing, branding, node budgets, and voice-profile administration. Do not publish port 8000 to an untrusted network without placing authentication and network access controls in front of it.
+The additional-tool gateway can still execute LocalAI administrative/destructive operations, including model/backend install/delete, task/job controls, trace/log clearing, branding, node budgets, and voice-profile administration. Hiding a tool from `tools/list` reduces context size; it is **not** an authorization boundary. Do not publish port 8000 to an untrusted network without authentication and network access controls in front of it.
