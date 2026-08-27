@@ -11,6 +11,21 @@ def test_full_swagger_operation_coverage():
     assert len({op.tool_name for op in ops}) == 123
 
 
+def test_full_swagger_metadata_is_preserved():
+    spec = load_spec()
+    assert len(spec["definitions"]) == 166
+
+    detokenize = spec["paths"]["/v1/detokenize"]["post"]
+    assert detokenize["parameters"][0]["schema"]["$ref"] == "#/definitions/schema.DetokenizeRequest"
+    assert detokenize["responses"]["200"]["schema"]["$ref"] == "#/definitions/schema.DetokenizeResponse"
+
+    request = spec["definitions"]["schema.DetokenizeRequest"]
+    response = spec["definitions"]["schema.DetokenizeResponse"]
+    assert "tokens" in request["properties"]
+    assert "model" in request["properties"]
+    assert "content" in response["properties"]
+
+
 def test_websocket_detection():
     ops = operations(load_spec())
     ws = {(op.method, op.path) for op in ops if op.websocket}
