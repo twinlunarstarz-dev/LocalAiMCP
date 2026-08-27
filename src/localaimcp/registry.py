@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional, get_type_hints
 from urllib.parse import quote
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model
@@ -263,9 +263,13 @@ def argument_model(tool_name: str, fn: Any | None = None) -> type[BaseModel]:
     if cached is not None:
         return cached
     fn = fn or TOOL_CALLABLES[tool_name]
+    resolved_hints = get_type_hints(fn, include_extras=True)
     fields: dict[str, tuple[Any, Any]] = {}
     for parameter in inspect.signature(fn).parameters.values():
-        annotation = parameter.annotation if parameter.annotation is not inspect.Parameter.empty else Any
+        annotation = resolved_hints.get(
+            parameter.name,
+            parameter.annotation if parameter.annotation is not inspect.Parameter.empty else Any,
+        )
         default = ... if parameter.default is inspect.Parameter.empty else parameter.default
         fields[parameter.name] = (annotation, default)
     model = create_model(
