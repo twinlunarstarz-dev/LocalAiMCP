@@ -10,6 +10,7 @@ from importlib.resources import files
 from typing import Any
 
 HTTP_METHODS = {"get", "post", "put", "patch", "delete", "head", "options"}
+MAX_TOOL_NAME_LENGTH = 64
 
 _TOOL_NAME_OVERRIDES: dict[tuple[str, str], str] = {
     ("POST", "/3d/generations"): "generate_3d_asset",
@@ -108,6 +109,13 @@ def safe_identifier(value: str) -> str:
     return value
 
 
+def _cap_name(name: str) -> str:
+    if len(name) <= MAX_TOOL_NAME_LENGTH:
+        return name
+    shortened = name[:MAX_TOOL_NAME_LENGTH].rsplit("_", 1)[0].rstrip("_")
+    return shortened or name[:MAX_TOOL_NAME_LENGTH]
+
+
 def _summary_tool_name(summary: str) -> str:
     text = re.sub(r"\([^)]*\)", " ", summary or "")
     text = re.sub(r"\bLocalAI\b", " ", text, flags=re.IGNORECASE)
@@ -118,7 +126,7 @@ def _summary_tool_name(summary: str) -> str:
         words[0] = _VERB_NORMALIZATION.get(words[0], words[0])
     if len(words) > 9:
         words = words[:9]
-    return "_".join(words).strip("_") or "call_localai"
+    return _cap_name("_".join(words).strip("_") or "call_localai")
 
 
 def _path_qualifier(path: str) -> str:
@@ -131,11 +139,12 @@ def _path_qualifier(path: str) -> str:
 
 
 def _unique_name(base: str, method: str, path: str, used: set[str]) -> str:
+    base = _cap_name(base)
     if base not in used:
         return base
 
     qualifier = _path_qualifier(path)
-    candidate = base if qualifier in base else f"{base}_{qualifier}"
+    candidate = _cap_name(base if qualifier in base else f"{base}_{qualifier}")
     if candidate not in used:
         return candidate
 
@@ -148,10 +157,11 @@ def _unique_name(base: str, method: str, path: str, used: set[str]) -> str:
         "HEAD": "head",
         "OPTIONS": "options",
     }.get(method, method.lower())
-    candidate = f"{base}_{action}"
+    candidate = _cap_name(f"{base}_{action}")
     index = 2
     while candidate in used:
-        candidate = f"{base}_{action}_{index}"
+        suffix = f"_{action}_{index}"
+        candidate = _cap_name(base[: MAX_TOOL_NAME_LENGTH - len(suffix)] + suffix)
         index += 1
     return candidate
 
@@ -160,7 +170,7 @@ def tool_name(method: str, path: str, operation: dict[str, Any]) -> str:
     method = method.upper()
     override = _TOOL_NAME_OVERRIDES.get((method, path))
     if override:
-        return override
+        return _cap_name(override)
     return _summary_tool_name(operation.get("summary") or operation.get("description") or f"{method} {path}")
 
 
