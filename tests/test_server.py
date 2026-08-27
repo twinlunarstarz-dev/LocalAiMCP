@@ -1,6 +1,7 @@
 import pytest
 from fastmcp import Client
 
+from localaimcp.metadata import _success_response
 from localaimcp.server import OPS, SPEC, TOOL_DESCRIPTIONS, mcp
 from localaimcp.spec import resolve_ref, safe_identifier
 
@@ -29,6 +30,9 @@ async def test_fastmcp_exposes_complete_tool_surface():
 
 @pytest.mark.asyncio
 async def test_detokenize_is_self_describing_to_an_mcp_client():
+    detok_op = next(op for op in OPS if op.tool_name == "detokenize")
+    assert _success_response(detok_op) is not None, detok_op.operation.get("responses")
+
     async with Client(mcp) as client:
         tools = await client.list_tools()
 
@@ -83,12 +87,32 @@ def test_referenced_request_bodies_surface_real_fields_in_description():
     assert checked >= 40
 
 
+def test_referenced_success_responses_surface_real_fields_in_description():
+    checked = 0
+    for op in OPS:
+        if op.websocket:
+            continue
+        response = _success_response(op)
+        if not response:
+            continue
+        schema = response.get("schema") or {}
+        ref = schema.get("$ref")
+        if not ref:
+            continue
+        definition = resolve_ref(SPEC, ref)
+        properties = definition.get("properties", {})
+        if not properties:
+            continue
+        description = TOOL_DESCRIPTIONS[op.tool_name]
+        assert any(f"`{field}`" in description for field in properties), (op.tool_name, ref, description)
+        checked += 1
+
+    assert checked >= 30
+
+
 def test_generated_http_tools_do_not_expose_wrapper_plumbing_by_default():
-    # Wrapper-level controls belong on raw_request, not on every normal LocalAI tool.
     for tool_name in ("chat", "detokenize", "list_models"):
         op = next(op for op in OPS if op.tool_name == tool_name)
-        if op.method == "GET" and not op.operation.get("parameters"):
-            continue
         params = {safe_identifier(str(p.get("name", "value"))) for p in op.operation.get("parameters", [])}
         assert "extra_headers" not in params
         assert "timeout_seconds" not in params
