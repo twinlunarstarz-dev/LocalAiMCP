@@ -9,17 +9,25 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from .client import LocalAIClient
 from .config import Settings
+from .metadata import field_description, operation_description, operation_search_text, parameter_description
 from .spec import Operation, load_spec, operations, safe_identifier
 
 SETTINGS = Settings()
 SPEC = load_spec()
 OPS = operations(SPEC)
 CLIENT = LocalAIClient(SETTINGS)
+TOOL_DESCRIPTIONS = {op.tool_name: operation_description(SPEC, op) for op in OPS}
+
 mcp = FastMCP(
     "LocalAI Control Plane",
     instructions=(
-        "Manage, test, and use the configured LocalAI server. Tools map to LocalAI REST/WebSocket endpoints. "
-        "Binary inputs accept data URIs, base64:<data>, HTTP(S) URLs, or files under LOCALAI_MCP_FILE_ROOT."
+        "Use these tools to operate the configured LocalAI server without needing prior LocalAI API knowledge. "
+        "Tool names describe the task rather than the HTTP route. If unsure which tool fits a goal, call `find_tools`. "
+        "Typed tools are preferred over `raw_request`. Every normal HTTP result has `ok`, `status_code`, and `elapsed_ms`; "
+        "JSON bodies are under `data`, text under `text`, SSE chunks under `events`, and binary results include mime/size "
+        "plus `base64` and/or `saved_path` depending on configuration. Check `ok` before using a result. "
+        "File parameters accept data URIs, base64:<data>, HTTP(S) URLs, or paths under LOCALAI_MCP_FILE_ROOT. "
+        "Tools named delete/clear/reset/shutdown/disable/cancel/forget/unpin change server state."
     ),
 )
 
@@ -51,22 +59,22 @@ def _schema_type(schema: dict[str, Any], name_hint: str) -> Any:
 
 def _model_from_schema(name: str, schema: dict[str, Any]) -> type[BaseModel]:
     required = set(schema.get("required", []))
-    # LocalAI reuses OpenAIRequest across many endpoints even though its generated
-    # Swagger marks `file` required. Requiring it for chat/images/embeddings would
-    # make valid calls impossible, so only the operation-level body stays required.
     if name.endswith("OpenAIRequest"):
         required.discard("file")
+
     fields: dict[str, tuple[Any, Any]] = {}
     for raw_name, prop in schema.get("properties", {}).items():
+        prop = prop or {}
         py_name = safe_identifier(raw_name)
-        annotation = _schema_type(prop or {}, name + py_name.title())
-        description = (prop or {}).get("description") or raw_name
+        annotation = _schema_type(prop, name + py_name.title())
+        description = field_description(SPEC, raw_name, prop, model_name=name)
         if raw_name in required:
             default = Field(..., description=description, alias=raw_name)
         else:
             annotation = Optional[annotation]
             default = Field(None, description=description, alias=raw_name)
         fields[py_name] = (annotation, default)
+
     return create_model(
         name.replace(".", "_").replace("-", "_"),
         __config__=ConfigDict(extra="allow", populate_by_name=True),
@@ -102,24 +110,21 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
             name += "_value"
         used.add(name)
         required = bool(p.get("required"))
-        description = p.get("description") or raw_name
         schema = p.get("schema") or p
-        if p.get("type") == "file":
-            annotation = str
-            description += " File source: data URI, base64:<data>, HTTP(S) URL, or path under the configured file root."
-        else:
-            annotation = _schema_type(schema, op.tool_name + name.title())
+
+        annotation = str if p.get("type") == "file" else _schema_type(schema, op.tool_name + name.title())
         if location == "body":
             declared_body = True
         default = inspect.Parameter.empty if required else None
         if not required:
             annotation = Optional[annotation]
+
         params.append(
             inspect.Parameter(
                 name,
                 inspect.Parameter.KEYWORD_ONLY,
                 default=default,
-                annotation=_annotated(annotation, description),
+                annotation=_annotated(annotation, parameter_description(SPEC, op, p)),
             )
         )
         meta[name] = {
@@ -129,15 +134,18 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
             "collection_format": p.get("collectionFormat"),
         }
 
-    # Preserve functionality when the generated Swagger omits a JSON body (notably
-    # PATCH /api/models/config-json/{name}) and for LocalAI extension fields.
     if op.method in {"POST", "PUT", "PATCH"} and not multipart and not declared_body and "body" not in used:
+        body_description = (
+            "JSON object containing model configuration fields to deep-merge into the existing config."
+            if op.path == "/api/models/config-json/{name}"
+            else "Optional JSON object for LocalAI extension fields not declared by this Swagger operation."
+        )
         params.append(
             inspect.Parameter(
                 "body",
                 inspect.Parameter.KEYWORD_ONLY,
                 default=None,
-                annotation=_annotated(Optional[dict[str, Any]], "Optional JSON body for undocumented or extension fields."),
+                annotation=_annotated(Optional[dict[str, Any]], body_description),
             )
         )
         meta["body"] = {"raw_name": "body", "in": "body", "file": False}
@@ -148,28 +156,14 @@ def _parameter_specs(op: Operation) -> tuple[list[inspect.Parameter], dict[str, 
                 "extra_form",
                 inspect.Parameter.KEYWORD_ONLY,
                 default=None,
-                annotation=_annotated(Optional[dict[str, Any]], "Additional multipart form fields, including backend-specific params."),
+                annotation=_annotated(
+                    Optional[dict[str, Any]],
+                    "Advanced only: additional multipart fields not declared by Swagger. Usually omit this.",
+                ),
             )
         )
         meta["extra_form"] = {"raw_name": "extra_form", "in": "extra_form", "file": False}
-    params.append(
-        inspect.Parameter(
-            "extra_headers",
-            inspect.Parameter.KEYWORD_ONLY,
-            default=None,
-            annotation=_annotated(Optional[dict[str, str]], "Optional headers merged into this LocalAI request."),
-        )
-    )
-    meta["extra_headers"] = {"raw_name": "extra_headers", "in": "control", "file": False}
-    params.append(
-        inspect.Parameter(
-            "timeout_seconds",
-            inspect.Parameter.KEYWORD_ONLY,
-            default=None,
-            annotation=_annotated(Optional[float], "Override the LocalAI request timeout for this call."),
-        )
-    )
-    meta["timeout_seconds"] = {"raw_name": "timeout_seconds", "in": "control", "file": False}
+
     return params, meta
 
 
@@ -182,9 +176,8 @@ def _make_http_callable(op: Operation):
         files: dict[str, Any] = {}
         body: Any = None
         path = op.path
-        extra_headers = kwargs.pop("extra_headers", None)
-        timeout_seconds = kwargs.pop("timeout_seconds", None)
         extra_form = kwargs.pop("extra_form", None)
+
         for name, value in kwargs.items():
             if value is None:
                 continue
@@ -204,8 +197,10 @@ def _make_http_callable(op: Operation):
                     form[raw] = value
             elif where == "body":
                 body = value
+
         if extra_form:
             form.update(extra_form)
+
         return await CLIENT.request(
             op.method,
             path,
@@ -213,29 +208,37 @@ def _make_http_callable(op: Operation):
             body=body,
             form=form,
             file_fields=files,
-            extra_headers=extra_headers,
-            timeout_seconds=timeout_seconds,
         )
 
     invoke.__name__ = op.tool_name
     invoke.__qualname__ = op.tool_name
-    invoke.__doc__ = f"{op.summary} LocalAI {op.method} {op.path}."
+    invoke.__doc__ = TOOL_DESCRIPTIONS[op.tool_name]
     invoke.__signature__ = inspect.Signature(params, return_annotation=dict[str, Any])
     invoke.__annotations__ = {p.name: p.annotation for p in params}
     invoke.__annotations__["return"] = dict[str, Any]
     return invoke
 
 
-async def _ws_backend_logs(model_id: str, max_messages: int = 50, timeout_seconds: float = 10) -> dict[str, Any]:
+async def _ws_backend_logs(
+    model_id: Annotated[str, Field(description="Model ID whose backend process logs should be streamed.")],
+    max_messages: Annotated[int, Field(description="Maximum log messages to collect before closing the WebSocket.")] = 50,
+    timeout_seconds: Annotated[float, Field(description="Stop waiting after this many seconds without another message.")] = 10,
+) -> dict[str, Any]:
     path = "/ws/backend-logs/" + quote(model_id, safe="")
     return await CLIENT.websocket_collect(path, max_messages=max_messages, timeout_seconds=timeout_seconds)
 
 
 async def _ws_audio_transform(
-    session: dict[str, Any],
-    frames_base64: list[str],
-    max_messages: int = 100,
-    timeout_seconds: float = 10,
+    session: Annotated[
+        dict[str, Any],
+        Field(description="Realtime audio transformation session/config object expected by LocalAI before audio frames."),
+    ],
+    frames_base64: Annotated[
+        list[str],
+        Field(description="Ordered PCM audio frames encoded as base64 strings; a `base64:` prefix is optional."),
+    ],
+    max_messages: Annotated[int, Field(description="Maximum transformed messages/frames to collect before closing.")] = 100,
+    timeout_seconds: Annotated[float, Field(description="Stop waiting after this many seconds without another message.")] = 10,
 ) -> dict[str, Any]:
     return await CLIENT.websocket_collect(
         "/audio/transformations/stream",
@@ -252,16 +255,25 @@ def _register_operation_tools() -> None:
             if op.path.startswith("/ws/backend-logs/"):
                 mcp.tool(
                     name=op.tool_name,
-                    description="Stream LocalAI backend logs over WebSocket, collect a bounded batch, then close.",
+                    description=(
+                        "Stream backend-process log messages for one loaded model over WebSocket. "
+                        "Input `model_id` identifies the model; `max_messages` and `timeout_seconds` bound the read. "
+                        "Returns collected messages and count, then closes the connection."
+                    ),
                     tags=op.tags,
                 )(_ws_backend_logs)
             elif op.path == "/audio/transformations/stream":
                 mcp.tool(
                     name=op.tool_name,
-                    description="Run a bounded bidirectional LocalAI realtime audio-transform WebSocket exchange. Frames are base64 PCM.",
+                    description=(
+                        "Run a bounded realtime audio-transformation WebSocket exchange. "
+                        "Send the LocalAI session/config object first, followed by base64 PCM frames in order. "
+                        "Returns transformed text/JSON/binary messages collected until the limit or timeout."
+                    ),
                     tags=op.tags,
                 )(_ws_audio_transform)
             continue
+
         fn = _make_http_callable(op)
         mcp.tool(name=op.tool_name, description=fn.__doc__, tags=op.tags)(fn)
 
@@ -269,9 +281,59 @@ def _register_operation_tools() -> None:
 _register_operation_tools()
 
 
-@mcp.tool(tags={"localai", "management", "test"})
-async def localai_health() -> dict[str, Any]:
-    """Check core LocalAI system, model, and backend endpoints concurrently."""
+@mcp.tool(
+    name="find_tools",
+    tags={"localai", "help", "discovery"},
+    description=(
+        "Find the best LocalAI tools for a plain-language goal when you do not know the tool name. "
+        "Example queries: 'transcribe audio', 'load a model', 'inspect traces', 'delete a voice profile'. "
+        "Returns matching tool names plus their complete usage descriptions; it does not call LocalAI."
+    ),
+)
+async def find_tools(
+    query: Annotated[str, Field(description="Plain-language task or capability to search for.")],
+    limit: Annotated[int, Field(description="Maximum matches to return, from 1 to 20.")] = 8,
+) -> dict[str, Any]:
+    terms = [term for term in safe_identifier(query).split("_") if len(term) > 1]
+    limit = max(1, min(limit, 20))
+    scored: list[tuple[int, Operation]] = []
+
+    for op in OPS:
+        haystack = operation_search_text(SPEC, op)
+        name_text = op.tool_name.replace("_", " ")
+        summary = str(op.summary).lower()
+        score = 0
+        for term in terms:
+            if term in name_text:
+                score += 8
+            if term in summary:
+                score += 5
+            if term in haystack:
+                score += 2
+        if score:
+            scored.append((score, op))
+
+    scored.sort(key=lambda item: (-item[0], item[1].tool_name))
+    matches = [
+        {
+            "name": op.tool_name,
+            "description": TOOL_DESCRIPTIONS[op.tool_name],
+            "tags": sorted(op.tags - {"localai"}),
+        }
+        for _, op in scored[:limit]
+    ]
+    return {"query": query, "matches": matches, "count": len(matches)}
+
+
+@mcp.tool(
+    name="server_health",
+    tags={"localai", "management", "test"},
+    description=(
+        "Check whether LocalAI is reachable and whether its system, model-list, and backend-list APIs respond successfully. "
+        "Takes no inputs. Runs the three checks concurrently and returns each wrapped response plus an overall `ok` flag."
+    ),
+)
+async def server_health() -> dict[str, Any]:
     import asyncio
 
     system, models, backends = await asyncio.gather(
@@ -287,9 +349,16 @@ async def localai_health() -> dict[str, Any]:
     }
 
 
-@mcp.tool(tags={"localai", "management", "test"})
-async def localai_schema_audit() -> dict[str, Any]:
-    """Audit MCP coverage of the bundled LocalAI Swagger without changing LocalAI state."""
+@mcp.tool(
+    name="schema_audit",
+    tags={"localai", "management", "test"},
+    description=(
+        "Verify that every operation in the bundled LocalAI Swagger maps to one unique typed MCP tool. "
+        "Takes no inputs and does not contact or modify LocalAI. Returns path/operation counts, WebSocket/multipart counts, "
+        "and operation counts by tag."
+    ),
+)
+async def schema_audit() -> dict[str, Any]:
     by_tag: dict[str, int] = {}
     for op in OPS:
         for tag in op.operation.get("tags", ["untagged"]):
@@ -307,9 +376,18 @@ async def localai_schema_audit() -> dict[str, Any]:
     }
 
 
-@mcp.tool(tags={"localai", "management", "test"})
-async def localai_probe_safe_gets(concurrency: int = 8) -> dict[str, Any]:
-    """Probe zero-argument GET endpoints concurrently; skip required-input and mutating routes."""
+@mcp.tool(
+    name="probe_safe_endpoints",
+    tags={"localai", "management", "test"},
+    description=(
+        "Test LocalAI's zero-argument GET endpoints without intentionally changing server state. "
+        "Input `concurrency` controls parallel checks. Skips routes requiring inputs and all mutating methods. "
+        "Returns pass/fail status for every probed route."
+    ),
+)
+async def probe_safe_endpoints(
+    concurrency: Annotated[int, Field(description="Maximum concurrent probes; clamped to 1-32.")] = 8,
+) -> dict[str, Any]:
     import asyncio
 
     candidates = [
@@ -342,16 +420,23 @@ async def localai_probe_safe_gets(concurrency: int = 8) -> dict[str, Any]:
     }
 
 
-@mcp.tool(tags={"localai", "raw", "management"})
-async def localai_raw_request(
-    method: Annotated[str, Field(description="HTTP method, e.g. GET, POST, PUT, PATCH, DELETE.")],
+@mcp.tool(
+    name="raw_request",
+    tags={"localai", "raw", "management"},
+    description=(
+        "Advanced escape hatch for a LocalAI HTTP route that has no typed MCP tool, such as a newer extension absent from "
+        "the bundled Swagger. Prefer typed tools when available. Provide an HTTP method, LocalAI path beginning with '/', "
+        "optional query/JSON body, headers, and timeout. Returns the same standard MCP response wrapper as typed HTTP tools."
+    ),
+)
+async def raw_request(
+    method: Annotated[str, Field(description="HTTP method, e.g. GET, POST, PUT, PATCH, or DELETE.")],
     path: Annotated[str, Field(description="LocalAI path beginning with '/', never a full URL.")],
-    query: Annotated[Optional[dict[str, Any]], Field(description="Optional query parameters.")] = None,
-    body: Annotated[Optional[Any], Field(description="Optional JSON body.")] = None,
+    query: Annotated[Optional[dict[str, Any]], Field(description="Optional query-string parameters.")] = None,
+    body: Annotated[Optional[Any], Field(description="Optional JSON request body.")] = None,
     extra_headers: Annotated[Optional[dict[str, str]], Field(description="Optional per-request headers.")] = None,
-    timeout_seconds: Annotated[Optional[float], Field(description="Optional request timeout override.")] = None,
+    timeout_seconds: Annotated[Optional[float], Field(description="Optional request timeout override in seconds.")] = None,
 ) -> dict[str, Any]:
-    """Call any LocalAI HTTP route, including extensions not present in the bundled Swagger."""
     return await CLIENT.request(
         method,
         path,
