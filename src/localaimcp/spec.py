@@ -91,7 +91,21 @@ class Operation:
 
 
 def load_spec() -> dict[str, Any]:
-    payload = files("localaimcp").joinpath("swagger.json.gz.b64").read_text().strip()
+    package = files("localaimcp")
+    parts: list[str] = []
+    for index in range(1, 5):
+        part = package.joinpath(f"swagger.part{index}.b64")
+        try:
+            parts.append(part.read_text().strip())
+        except FileNotFoundError:
+            parts = []
+            break
+
+    if parts:
+        payload = "".join(parts)
+    else:
+        payload = package.joinpath("swagger.json.gz.b64").read_text().strip()
+
     return json.loads(gzip.decompress(base64.b64decode(payload)))
 
 
